@@ -1,0 +1,98 @@
+image:
+  repository: otel/opentelemetry-collector-contrib 
+  tag: latest
+mode: "deployment"
+config:
+  receivers:
+    sqlquery:
+      driver: sqlserver
+      datasource: "sqlserver://admin:password@host:port" # replace values of password,host and port.
+      queries:
+        - sql: "SELECT database_id,used_log_space_in_bytes,total_log_size_in_bytes,CAST(used_log_space_in_percent AS INT) AS used_log_space_in_percent FROM  sys.dm_db_log_space_usage"
+          metrics:
+            metric_name: "mssql_log_space_used_pct"
+            value_column: "used_log_space_in_percent"
+            attribute_columns: ["database_id"]
+            data_type: "gauge"
+        - sql:  "SELECT
+                database_name,
+                DATEDIFF(hour, MAX(backup_finish_date), GETDATE()) AS hours_since_last_backup
+            FROM msdb.dbo.backupset
+            WHERE type = 'D'
+            GROUP BY database_name"
+          metrics:
+            metric_name: "mssql_last_backup_time"
+            value_column: "hours_since_last_backup"
+            attribute_columns: ["database_name"]
+            data_type: "gauge"
+
+        - sql:  "SELECT
+                 database_name,
+                 DATEDIFF(hour, MAX(backup_finish_date), GETDATE()) AS last_log_backup_hours
+                 FROM
+                 msdb.dbo.backupset
+                 WHERE
+                 type = 'L'
+                 GROUP BY
+                 database_name"
+          metrics:
+            metric_name: "mssql_last_log_backup_time"
+            value_column: "last_log_backup_hours"
+            attribute_columns: ["database_name"]
+            data_type: "gauge"
+
+
+        - sql: "SELECT
+                    name AS database_name,
+                    CASE
+                        WHEN state_desc = 'ONLINE' THEN 1
+                        WHEN state_desc = 'SUSPECT' THEN 2
+                        WHEN state_desc = 'OFFLINE' THEN 3
+                        ELSE 0
+                    END AS database_state
+                FROM
+                    sys.databases"
+          metrics:
+            metric_name: "mssql_database_state"
+            value_column: "database_state"
+            attribute_columns: ["database_name"]
+            data_type: "gauge"
+
+        - sql:  "SELECT session_id,request_id,start_time,status,command,total_elapsed_time / 60000.0 AS total_elapsed_time_minutes 
+                  FROM sys.dm_exec_requests WHERE blocking_session_id <> 0;"
+          metrics:
+            metric_name: "mssql_Blocking_session_time_"
+            value_column: "total_elapsed_time_minutes"
+            attribute_columns: ["session_id"]
+            data_type: "gauge"
+
+
+
+        - sql:  "SELECT 
+                DB_NAME(database_id) AS DatabaseName,
+                name AS FileName,
+                size / 128.0 AS CurrentSizeMB,
+                size / 128.0 - ISNULL(CAST(FILEPROPERTY(name, 'SpaceUsed') AS INT), 0) / 128 AS FreeSpaceMB,
+                (size / 128 - ISNULL(CAST(FILEPROPERTY(name, 'SpaceUsed') AS INT), 0) / 128) * 100 / (size / 128) AS FreeSpacePercent
+                FROM sys.master_files;"
+          metrics:
+            metric_name: "mssql_database_free_space"
+            value_column: "FreeSpacePercent"
+            attribute_columns: ["DatabaseName","FileName"]
+            data_type: "gauge"
+
+      collection_interval: 60s    
+
+
+  exporters:
+    datadog:
+      api:
+        site: "datadoghq.com"
+        key: "<API Key>" #Insert your Datadog API key  
+  
+  
+  service:
+    pipelines:
+      metrics:
+        receivers: [sqlquery]
+        exporters: [datadog]
