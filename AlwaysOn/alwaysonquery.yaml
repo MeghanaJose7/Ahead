@@ -1,0 +1,327 @@
+
+receivers:
+  sqlquery:
+    driver: sqlserver
+    datasource: "sqlserver://admin:password@host:port" # replace values of password,host and port
+    queries:
+      - sql: "SELECT 
+              ag.name AS [AvailabilityGroupName],
+              ar.replica_server_name AS [ReplicaServerName],
+              ars.is_local AS [IsLocalReplica],
+              db.name AS [DatabaseName],
+              CASE 
+                  WHEN drs.synchronization_health_desc = 'HEALTHY' THEN 1
+                  WHEN drs.synchronization_health_desc = 'PARTIALLY_HEALTHY' THEN 2
+                  WHEN drs.synchronization_health_desc = 'NOT_HEALTHY' THEN 0
+                  ELSE NULL
+              END AS [SynchronizationHealth]
+              FROM 
+                  sys.availability_groups AS ag
+              INNER JOIN 
+                  sys.availability_replicas AS ar 
+                  ON ag.group_id = ar.group_id
+              INNER JOIN 
+                  sys.dm_hadr_database_replica_states AS drs
+                  ON ar.replica_id = drs.replica_id
+              INNER JOIN 
+                  sys.databases AS db
+                  ON drs.database_id = db.database_id
+              INNER JOIN 
+                  sys.dm_hadr_availability_replica_states AS ars 
+                  ON ar.replica_id = ars.replica_id
+              WHERE 
+                  drs.group_id = ag.group_id;"
+        metrics:
+          - metric_name: "AG_SynchronizationHealth"
+            value_column: "SynchronizationHealth"
+            attribute_columns: ["ReplicaServerName","AvailabilityGroupName","DatabaseName"]
+            data_type: "gauge"
+
+      - sql: "SELECT 
+              ag.name AS [AvailabilityGroupName],
+              ar.replica_server_name AS [ReplicaName],
+              drs.database_id AS [DatabaseID],
+              db_name(drs.database_id) AS [DatabaseName],
+              drs.last_commit_time AS [SecondaryLastCommitTime],
+              pr.last_commit_time AS [PrimaryLastCommitTime],
+              DATEDIFF(SECOND, drs.last_commit_time, pr.last_commit_time) AS [EstimatedDataLossInSeconds]
+              FROM 
+              sys.dm_hadr_database_replica_states drs
+              JOIN 
+              sys.availability_replicas ar 
+              ON drs.replica_id = ar.replica_id
+              JOIN 
+              sys.availability_groups ag 
+              ON ar.group_id = ag.group_id
+              JOIN 
+              sys.dm_hadr_database_replica_states pr 
+              ON drs.group_database_id = pr.group_database_id
+              AND pr.is_primary_replica = 1
+              WHERE 
+              drs.is_primary_replica = 0;
+
+              "
+        metrics:
+          - metric_name: "AG_EstimatedDataLoss"
+            value_column: "EstimatedDataLossInSeconds"
+            attribute_columns: ["AvailabilityGroupName","ReplicaName","DatabaseName"]
+            data_type: "gauge"      
+     
+      - sql: "SELECT 
+              ag.name AS [AvailabilityGroupName],
+              l.dns_name AS [ListenerName],
+              l.port AS [ListenerPort],
+              ip.ip_address AS [ListenerIPAddress],
+              CASE 
+                  WHEN l.is_conformant = 'true' THEN 1 
+                  ELSE 0 
+              END AS [ListenerState]
+              FROM 
+                  sys.availability_group_listeners l
+              JOIN 
+                  sys.availability_groups ag ON l.group_id = ag.group_id
+              JOIN 
+                  sys.availability_group_listener_ip_addresses ip ON l.listener_id = ip.listener_id;
+
+              "
+        metrics:
+          - metric_name: "AG_ListenerState"
+            value_column: "ListenerState"
+            attribute_columns: ["AvailabilityGroupName","ListenerName","ListenerIPAddress"]
+            data_type: "gauge"   
+
+      - sql: "SELECT 
+              ar.replica_server_name,
+              CASE 
+                  WHEN rs.role_desc = 'PRIMARY' THEN 1 
+                  WHEN rs.role_desc = 'SECONDARY' THEN 2 
+                  ELSE 0
+              END AS role_desc_int,
+              db.name AS database_name
+              FROM 
+                  sys.dm_hadr_availability_replica_states rs
+              JOIN 
+                  sys.availability_replicas ar
+                  ON rs.replica_id = ar.replica_id
+              JOIN 
+                  sys.dm_hadr_database_replica_states drs
+                  ON rs.replica_id = drs.replica_id
+              JOIN
+                  sys.databases db
+                  ON drs.database_id = db.database_id
+              WHERE 
+                  rs.is_local = 1;
+              "
+        metrics:
+          - metric_name: "AG_Group_Role_change"
+            value_column: "role_desc_int"
+            attribute_columns: ["replica_server_name","database_name"]
+            data_type: "gauge"   
+
+      - sql: "SELECT 
+              DB_NAME() AS database_name,
+              CASE 
+                  WHEN sys.fn_hadr_backup_is_preferred_replica('master') = 1 THEN 1
+                  WHEN sys.fn_hadr_backup_is_preferred_replica('master') = 'true' THEN 1
+                  WHEN sys.fn_hadr_backup_is_preferred_replica('master') = 0 THEN 0
+                  WHEN sys.fn_hadr_backup_is_preferred_replica('master') = 'false' THEN 0
+              END AS state;"       #SELECT DB_NAME() AS database_name,sys.fn_hadr_backup_is_preferred_replica('master') AS state;
+        metrics:
+          - metric_name: "AG_Preferred_replica_state"
+            value_column: "state"
+            attribute_columns: ["database_name"]
+            data_type: "gauge"   
+
+
+      - sql: "SELECT 
+              ar.replica_server_name,
+              CASE rs.role_desc
+                  WHEN 'PRIMARY' THEN 1
+                  WHEN 'SECONDARY' THEN 2
+                  ELSE 0 
+              END AS role_desc
+              FROM sys.availability_replicas ar
+              JOIN sys.dm_hadr_availability_replica_states rs 
+              ON ar.replica_id = rs.replica_id
+              WHERE ar.group_id = rs.group_id;"    
+        metrics:
+          - metric_name: "AG_Failover"
+            value_column: "role_desc"
+            attribute_columns: ["replica_server_name"]
+            data_type: "gauge" 
+
+      - sql: "SELECT 
+              ag.name AS AvailabilityGroupName,
+              ar.replica_server_name AS ReplicaServerName,
+              ar.availability_mode_desc AS AvailabilityMode,
+              ar.failover_mode_desc AS FailoverMode,
+              ars.synchronization_health_desc AS SynchronizationHealth,
+              CASE 
+                  WHEN ar.availability_mode_desc = 'SYNCHRONOUS_COMMIT' 
+                      AND ar.failover_mode_desc = 'AUTOMATIC' 
+                      AND ars.synchronization_health_desc = 'HEALTHY'
+                  THEN 1 
+                  ELSE 0 
+              END AS FailoverReadiness
+              FROM 
+                  sys.availability_groups ag
+              JOIN 
+                  sys.availability_replicas ar ON ag.group_id = ar.group_id
+              JOIN 
+                  sys.dm_hadr_availability_replica_states ars ON ar.replica_id = ars.replica_id
+              WHERE 
+                  ars.group_id = ag.group_id
+                  AND ars.role_desc = 'SECONDARY';
+              "    
+        metrics:
+          - metric_name: "AG_FailoverReadiness"
+            value_column: "FailoverReadiness"
+            attribute_columns: ["AvailabilityGroupName","ReplicaServerName","AvailabilityMode","FailoverMode","SynchronizationHealth"]
+            data_type: "gauge"   
+        
+      - sql: "SELECT 
+                ar.replica_server_name AS ReplicaName,
+                CASE ars.role 
+                    WHEN 1 THEN 'PRIMARY'
+                    WHEN 2 THEN 'SECONDARY'
+                    ELSE 'UNKNOWN'
+                END AS ReplicaRole,
+                CASE ars.synchronization_health_desc
+                    WHEN 'HEALTHY' THEN 2
+                    WHEN 'PARTIALLY_HEALTHY' THEN 1
+                    WHEN 'NOT_HEALTHY' THEN 0
+                    ELSE -1  
+                END AS SyncHealth  
+                FROM 
+                    sys.availability_replicas ar
+                JOIN 
+                    sys.dm_hadr_availability_replica_states ars 
+                    ON ar.replica_id = ars.replica_id
+                ORDER BY 
+                    ar.replica_server_name;
+
+                            "    
+        metrics:
+          - metric_name: "AG_ReplicaHealth"
+            value_column: "SyncHealth"
+            attribute_columns: ["ReplicaName","ReplicaRole"]
+            data_type: "gauge"
+        
+      - sql: "DECLARE @LogSendQueueSizeThresholdKB INT = 50000;
+            DECLARE @RedoQueueSizeThresholdKB INT = 50000; 
+
+            SELECT
+                ar.replica_server_name AS ReplicaName,
+                d.name AS DatabaseName,
+                CAST(drs.log_send_queue_size / 1024 AS INT) AS LogSendQueueSizeKB,
+                CAST(drs.redo_queue_size / 1024 AS INT) AS RedoQueueSizeKB,
+                CASE
+                    WHEN CAST(drs.log_send_queue_size / 1024 AS INT) > @LogSendQueueSizeThresholdKB THEN 1
+                    ELSE 0
+                END AS LogSendStatus,
+                CASE
+                    WHEN CAST(drs.redo_queue_size / 1024 AS INT) > @RedoQueueSizeThresholdKB THEN 1
+                    ELSE 0
+                END AS RedoStatus,
+                CASE
+                    WHEN 
+                        (CAST(drs.log_send_queue_size / 1024 AS INT) > @LogSendQueueSizeThresholdKB) OR 
+                        (CAST(drs.redo_queue_size / 1024 AS INT) > @RedoQueueSizeThresholdKB) 
+                    THEN 1
+                    ELSE 0
+                END AS ReplicationFallingBehindStatus 
+            FROM 
+                sys.dm_hadr_database_replica_states drs
+            JOIN 
+                sys.databases d 
+                ON drs.database_id = d.database_id
+            JOIN
+                sys.dm_hadr_availability_replica_states ars
+                ON drs.replica_id = ars.replica_id
+            JOIN
+                sys.availability_replicas ar
+                ON ars.replica_id = ar.replica_id
+            WHERE 
+                drs.is_primary_replica = 0 
+            ORDER BY 
+                ar.replica_server_name, d.name;"    
+        metrics:
+          - metric_name: "AG_ReplicationFallingBehind"
+            value_column: "ReplicationFallingBehindStatus"
+            attribute_columns: ["ReplicaName","DatabaseName"]
+            data_type: "gauge"
+
+      - sql: "SELECT 
+            ag.name AS [Availability Group],
+            db.name AS [Database Name],
+            db.state_desc AS [Database State],
+            drs.synchronization_state_desc AS [Synchronization State],
+            CASE 
+                WHEN drs.synchronization_health_desc = 'Not Healthy' THEN 0
+                WHEN drs.synchronization_health_desc = 'Partially Healthy' THEN 1
+                WHEN drs.synchronization_health_desc = 'Healthy' THEN 2
+                ELSE -1 
+            END AS [Synchronization Health]
+            FROM 
+                sys.dm_hadr_database_replica_states drs
+                JOIN sys.databases db ON drs.database_id = db.database_id
+                JOIN sys.availability_groups ag ON drs.group_id = ag.group_id
+            ORDER BY 
+                ag.name, db.name;
+            "    
+        metrics:
+          - metric_name: "AG_DatabaseHealth"
+            value_column: "Synchronization Health"
+            attribute_columns: ["Availability Group","Database Name"]
+            data_type: "gauge"
+
+      - sql: "SELECT 
+            member_name AS [Node Name],
+            member_type_desc AS [Member Type],
+            number_of_quorum_votes AS [Quorum Votes],
+            CASE 
+                WHEN member_state_desc = 'Up' THEN 1
+                WHEN member_state_desc = 'Down' THEN 0
+                ELSE -1 
+            END AS [Node State]
+            FROM 
+                sys.dm_hadr_cluster_members;
+
+            "    
+        metrics:
+          - metric_name: "AG_ClusterFailover"
+            value_column: "Node State"
+            attribute_columns: ["Node Name"]
+            data_type: "gauge"
+
+      - sql: "SELECT 
+            wait_type,
+            wait_time_ms,
+            CASE 
+                WHEN wait_time_ms > 10000 THEN 1 
+                ELSE 0 
+            END AS queryslowdown
+            FROM 
+                sys.dm_os_wait_stats
+            WHERE 
+                wait_type = 'HADR_SYNC_COMMIT';"    
+        metrics:
+          - metric_name: "AG_QuerySlowdown"
+            value_column: "queryslowdown"
+            attribute_columns: ["wait_type"]
+            data_type: "gauge"
+
+    collection_interval: 60s    
+exporters:
+  datadog:
+    api:
+      site: "datadoghq.com"
+      key: "<API Key>" #Insert your Datadog API key
+
+  
+  
+service:
+  pipelines:
+    metrics:
+      receivers: [sqlquery]
+      exporters: [datadog]
